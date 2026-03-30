@@ -1,82 +1,124 @@
-import csv
-import random
-from datetime import datetime, timedelta
+import sys
+from pyspark.context import SparkContext
+from pyspark.sql.functions import *
+from awsglue.context import GlueContext
 
-num_records = 30000
+# -------------------------
+# INITIALIZE
+# -------------------------
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
 
+# -------------------------
+# READ DATA
+# -------------------------
+users_df = spark.read.option("header", True).csv("s3://amazon-s3-bucket-30k/test-anil/users.csv")
+roles_df = spark.read.option("header", True).csv("s3://amazon-s3-bucket-30k/test-anil/roles.csv")
+
+# -------------------------
+# CAST TYPES
+# -------------------------
+users_df = users_df.withColumn("user_id", col("user_id").cast("int")) \
+                   .withColumn("signup_date", to_date(col("signup_date"))) \
+                   .withColumn("last_login_date", to_date(col("last_login_date")))
+
+roles_df = roles_df.withColumn("user_id", col("user_id").cast("int")) \
+                   .withColumn("assigned_date", to_date(col("assigned_date")))
+
+# -------------------------
+# JOIN
+# -------------------------
+df = users_df.join(roles_df, "user_id", "left")
+
+###
+
+df = df.withColumn(
+    "is_locked", when (col("status") == "active", False).otherwise(True)
+    )
+
+# -------------------------
+# VALIDATION
+# -------------------------
 valid_roles = ["admin", "editor", "viewer"]
-invalid_roles = ["invalid_role", "guest", "unknown", None]
+
+df = df.withColumn(
+    "validation_status",
+    when(col("username").isNull() | (col("username") == ""), "INVALID_USERNAME")
+    .when(col("email").isNull() | (~col("email").like("%@%.com")), "INVALID_EMAIL")
+    .when(col("status").isNull() | (~col("status").isin("active", "inactive")), "INVALID_STATUS")
+    .when(datediff(current_date(), col("last_login_date")) > 180, "INACTIVE_USER")
+    .when(col("role_name").isNull() | (col("role_name") == ""), "MISSING_ROLE")
+    .when(~col("role_name").isin(valid_roles), "INVALID_ROLE")
+    .when(col("assigned_date") < col("signup_date"), "INVALID_ASSIGN_DATE")
+    .when(col("assigned_date") > current_date(), "FUTURE_DATE")
+    .otherwise("VALID")
+)
 
 # -------------------------
-# Generate users.csv
+# AGGREGATION (SEPARATE)
 # -------------------------
-with open("users.csv", "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow([
-        "user_id", "username", "email",
-        "signup_date", "last_login_date", "status"
-    ])
-
-    for i in range(1, num_records + 1):
-
-        signup_date = datetime.now() - timedelta(days=random.randint(1, 365))
-        last_login_date = datetime.now() - timedelta(days=random.randint(1, 400))
-
-        rand = random.random()
-
-        # Introduce invalid data scenarios
-        if rand < 0.8:
-            username = f"user_{i}"
-            email = f"user_{i}@test.com"
-            status = "active"
-        elif rand < 0.9:
-            username = ""   # missing username
-            email = f"user_{i}@test.com"
-            status = "inactive"
-        elif rand < 0.97:
-            username = f"user_{i}"
-            email = "invalid_email"   # bad format
-            status = "active"
-        else:
-            username = None
-            email = None
-            status = "unknown"   # invalid status
-
-        writer.writerow([
-            i,
-            username,
-            email,
-            signup_date.strftime("%Y-%m-%d"),
-            last_login_date.strftime("%Y-%m-%d"),
-            status
-        ])
-
+agg_df = df.groupBy("user_id").agg(
+    count("role_name").alias("total_roles"),
+    min("assigned_date").alias("first_role_assigned_date")
+)
 
 # -------------------------
-# Generate roles.csv
+# JOIN BACK (SAFE)
 # -------------------------
-with open("roles.csv", "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow([
-        "role_id", "user_id", "role_name", "assigned_date"
-    ])
+final_df = df.join(agg_df, on="user_id", how="left")
 
-    for i in range(1, num_records + 1):
+###
+final_df = final_df.withColumn (
+    "is_locked", when(col("status") == "active",False).otherwise(True))
 
-        assigned_date = datetime.now() - timedelta(days=random.randint(1, 365))
-        rand = random.random()
+# -------------------------
+# DEBUG (IMPORTANT)
+# -------------------------
+print("Final Schema:")
+final_df.printSchema()
 
-        # Introduce invalid role scenarios
-        if rand < 0.8:
-            role = random.choice(valid_roles)
-        elif rand < 0.95:
-            role = random.choice(invalid_roles)
-        else:
-            role = ""   # empty role
+# -------------------------
+# SELECT FINAL COLUMNS (NO ERROR NOW)
+# -------------------------
+final_df = final_df.select(
+    col("user_id"),
+    col("username"),
+    col("email"),
+    col("status"),  
+    col("role_name"),
+    col("signup_date"),
+    col("last_login_date"),
+    col("assigned_date"),
+    col("total_roles"),
+    col("first_role_assigned_date"),
+    col("validation_status"),
+    col("is_locked")
+)
 
-        writer.writerow([
-            i,
-            i,
-            role,
-            assigned_date.strftime("%Y-%m-%d")
-        ])
+# -------------------------
+# SPLIT
+# -------------------------
+valid_df = final_df.filter(col("validation_status") == "VALID")
+invalid_df = final_df.filter(col("validation_status") != "VALID")
+
+# -------------------------
+# WRITE TO REDSHIFT
+# -------------------------
+valid_df.write \
+    .format("jdbc") \
+    .option("url", "jdbc:redshift://redshift-cluster-1.cnibdkql4wal.us-east-1.redshift.amazonaws.com:5439/dev") \
+    .option("dbtable", "analytics.user_summary") \
+    .option("user", "awsuser") \
+    .option("password", "aT$8#6Hp") \
+    .option("driver", "com.amazon.redshift.jdbc42.Driver") \
+    .mode("append") \
+    .save()
+
+# -------------------------
+# WRITE INVALID DATA
+# -------------------------
+invalid_df.write \
+    .mode("overwrite") \
+    .option("header", True) \
+    .csv("s3://amazon-s3-bucket-30k/test-anil/invalid_data/")
