@@ -99,13 +99,16 @@ final_df = final_df.select(
 # -------------------------
 # SPLIT
 # -------------------------
-valid_df = final_df.filter(col("validation_status") == "VALID")
-invalid_df = final_df.filter(col("validation_status") != "VALID")
+final_valid_df = final_df.filter(col("validation_status") == "VALID") & (col("is_locked") == False)
+
+rejected_df = final_df.filter (
+    (col("validation_status")!= "VALID") | (col("is_locked") == True)
+)
 
 # -------------------------
 # WRITE TO REDSHIFT
 # -------------------------
-valid_df.write \
+final_valid_df.write \
     .format("jdbc") \
     .option("url", "jdbc:redshift://redshift-cluster-1.cnibdkql4wal.us-east-1.redshift.amazonaws.com:5439/dev") \
     .option("dbtable", "analytics.user_summary") \
@@ -118,7 +121,7 @@ valid_df.write \
 # -------------------------
 # WRITE INVALID DATA
 # -------------------------
-invalid_df.write \
+rejected_df.write \
     .mode("overwrite") \
     .option("header", True) \
     .csv("s3://amazon-s3-bucket-30k/test-anil/invalid_data/")
