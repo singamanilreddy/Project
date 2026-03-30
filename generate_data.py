@@ -2,7 +2,7 @@ import csv
 import random
 from datetime import datetime, timedelta
 
-num_records = 10000
+num_records = 30000
 
 valid_roles = ["admin", "editor", "viewer"]
 invalid_roles = ["invalid_role", "guest", "unknown", None]
