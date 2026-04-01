@@ -13,8 +13,8 @@ spark = glueContext.spark_session
 # -------------------------
 # READ DATA
 # -------------------------
-users_df = spark.read.option("header", True).csv("s3://amazon-s3-bucket-30k/test-anil/users.csv")
-roles_df = spark.read.option("header", True).csv("s3://amazon-s3-bucket-30k/test-anil/roles.csv")
+users_df = spark.read.option("header", True).csv("s3://amazon-s3-bucket-30/test-anil/users.csv")
+roles_df = spark.read.option("header", True).csv("s3://amazon-s3-bucket-30/test-anil/roles.csv")
 
 # -------------------------
 # CAST TYPES
@@ -96,7 +96,7 @@ invalid_df = final_df.filter(col("validation_status") != "VALID")
 # -------------------------
 valid_df.write \
     .format("jdbc") \
-    .option("url", "jdbc:redshift://redshift-cluster-1.cnibdkql4wal.us-east-1.redshift.amazonaws.com:5439/dev") \
+    .option("url", "jdbc:redshift://redshift-cluster-1.cqchjfzl522u.us-east-1.redshift.amazonaws.com:5439/dev") \
     .option("dbtable", "analytics.user_summary") \
     .option("user", "awsuser") \
     .option("password", "aT$8#6Hp") \
@@ -110,6 +110,4 @@ valid_df.write \
 invalid_df.write \
     .mode("overwrite") \
     .option("header", True) \
-    .csv("s3://amazon-s3-bucket-30k/test-anil/invalid_data/")
-
-####
+    .csv("s3://amazon-s3-bucket-30/test-anil/invalid_data/")
